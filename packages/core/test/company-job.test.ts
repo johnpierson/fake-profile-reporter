@@ -71,6 +71,34 @@ describe('company pages', () => {
     const c = parseCompanyPage(companyHtml({ name: 'Acme Recruiting', industry: 'Staffing and Recruiting' }), 'acme-recruiting');
     expect(scoreCompany(c, NOW).signals.map((x) => x.id)).not.toContain('company.hiring-name');
   });
+
+  test('a mid-size claim needs at least three people behind it', () => {
+    const two = scoreCompany(parseCompanyPage(companyHtml({ employees: 2 }), 'example-co'), NOW);
+    expect(two.signals.map((x) => x.id)).toContain('company.size-mismatch');
+    expect(two.level).toBe('medium'); // the discrepancy lifts a low score
+    const four = scoreCompany(parseCompanyPage(companyHtml({ employees: 4 }), 'example-co'), NOW);
+    expect(four.signals.map((x) => x.id)).not.toContain('company.size-mismatch');
+  });
+
+  test('a self-employed page claiming 51-200 employees is a discrepancy', () => {
+    const c = parseCompanyPage(companyHtml({}), 'example-co');
+    expect(scoreCompany({ ...c, type: 'Self-Employed' }, NOW).signals.map((x) => x.id)).toContain('company.self-employed-large');
+  });
+
+  test('a fresh logo on a long-founded company is flagged', () => {
+    const c = parseCompanyPage(companyHtml({ founded: 2010, logoAt: NOW - 20 * DAY }), 'example-co');
+    expect(scoreCompany(c, NOW).signals.map((x) => x.id)).toContain('company.new-logo');
+  });
+
+  test('unread page details are missing, but a missing website is observed', () => {
+    const s = scoreCompany(parseCompanyPage(companyHtml({ employees: null, founded: null, size: null, website: null }), 'example-co'), NOW);
+    for (const m of ['Employees on LinkedIn', 'Founding year', 'Company size']) expect(s.missing).toContain(m);
+    const ids = s.signals.filter((x) => x.weight > 0).map((x) => x.id);
+    for (const id of ['company.size-mismatch', 'company.no-employees', 'company.few-employees', 'company.new-logo', 'company.self-employed-large']) {
+      expect(ids).not.toContain(id);
+    }
+    expect(s.signals.find((x) => x.id === 'company.no-website')?.kind).toBe('weak');
+  });
 });
 
 describe('job postings', () => {
@@ -129,6 +157,30 @@ describe('job postings', () => {
     const j = parseJobPosting(jobHtml({ slug: 'brand-hiring', company: 'Brand Hiring' }), '5', NOW);
     const s = scoreJob(j, shady, scoreCompany(shady, NOW));
     expect(s.signals.find((x) => x.id === 'job.company-suspicious')?.kind).toBe('discrepancy');
+  });
+
+  for (const [id, description] of [
+    [
+      'job.reshipping',
+      '<p>As a Logistics Coordinator you will receive and inspect packages delivered to your home, photograph the contents, and reship them to our regional partners using the prepaid labels we email each morning. You will keep a simple log of tracking numbers and report any damaged items to your supervisor. The role is fully remote, hours are flexible, and we provide a short onboarding call to walk you through the process and our reporting templates.</p>',
+    ],
+    [
+      'job.money-transfer',
+      '<p>As a Client Payments Coordinator you will process payments on behalf of our overseas customers and transfer funds to our suppliers within one business day. You will reconcile each transaction in a shared spreadsheet, confirm receipt with the accounts team, and keep clear records for the monthly audit. The role is fully remote, hours are flexible, and we provide a short onboarding call to walk you through our banking partners and reporting templates.</p>',
+    ],
+  ] as const) {
+    test(`${id} is a discrepancy that keeps the level at least medium`, () => {
+      const j = parseJobPosting(jobHtml({ description }), '6', NOW);
+      expect(j.description.length).toBeGreaterThanOrEqual(400);
+      const s = scoreJob(j, company, companyScore);
+      expect(s.signals.find((x) => x.id === id)?.kind).toBe('discrepancy');
+      expect(s.level).not.toBe('low');
+    });
+  }
+
+  test('a posting naming another company than its linked page is flagged', () => {
+    const j = parseJobPosting(jobHtml({ slug: 'example-co', company: 'Northwind Traders' }), '7', NOW);
+    expect(scoreJob(j, company, companyScore).signals.map((x) => x.id)).toContain('job.company-name-mismatch');
   });
 
   test('job descriptions are compared by digest', () => {

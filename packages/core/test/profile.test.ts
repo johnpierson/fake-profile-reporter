@@ -348,6 +348,134 @@ describe('scoreProfile', () => {
     expect(extractProfileFacts(fakeSnapshot({ photoUploadedAt: null }), NOW).photo).toEqual({ present: false, uploadedAt: null });
   });
 
+  for (const [name, postTimes, activityId] of [
+    ['no public posts', [], 'activity.none'],
+    ['only a stale post', [NOW - 400 * DAY], 'activity.stale'],
+  ] as const) {
+    test(`a verified long-tenure senior with ${name} stays low`, () => {
+      const f = extractProfileFacts(
+        fakeSnapshot({
+          slug: 'riley-okafor',
+          firstName: 'Riley',
+          lastName: 'Okafor',
+          headline: 'Senior Director of Platform Engineering at Example Corp',
+          summary: 'I lead platform teams that keep deploys boring and on-call quiet.',
+          joinedAt: Date.UTC(2012, 3, 15),
+          verifications: [['Identity', 'Verified by LinkedIn in May 2025']],
+          positions: [
+            { title: 'Senior Director of Platform Engineering', company: 'Example Corp', startYear: 2019 },
+            { title: 'Engineering Manager', company: 'Sample Systems', startYear: 2011, endYear: 2019 },
+          ],
+          postTimes: [...postTimes],
+        }),
+        NOW,
+      );
+      const s = scoreProfile(f, NOW);
+      expect(s.level).toBe('low');
+      const ids = s.signals.map((x) => x.id);
+      expect(ids).toContain(activityId);
+      for (const id of ['pattern.senior-no-network', 'pattern.career-vs-age', 'pattern.aged-resale', 'aged.shell']) {
+        expect(ids).not.toContain(id);
+      }
+    });
+  }
+
+  test('a brand-new intern with a real footprint is medium on weak signals only', () => {
+    const f = extractProfileFacts(
+      fakeSnapshot({
+        slug: 'casey-nguyen',
+        firstName: 'Casey',
+        lastName: 'Nguyen',
+        headline: 'Software Engineering Intern at Example Corp',
+        summary: 'Computer science student who enjoys building small web apps and learning from code review.',
+        joinedAt: NOW - 5 * DAY,
+        positions: [{ title: 'Software Engineering Intern', company: 'Example Corp', startYear: 2026 }],
+        connections: '80 connections',
+        followers: 40,
+        postTimes: [NOW - 2 * DAY],
+      }),
+      NOW,
+    );
+    const s = scoreProfile(f, NOW);
+    expect(s.level).toBe('medium');
+    const ids = s.signals.map((x) => x.id);
+    expect(ids).toContain('age.new');
+    for (const id of ['pattern.recruiter-new', 'pattern.senior-no-network', 'pattern.career-vs-age', 'pattern.followers-no-activity']) {
+      expect(ids).not.toContain(id);
+    }
+    expect(s.signals.filter((x) => x.weight > 0).every((x) => x.kind === 'weak')).toBe(true);
+  });
+
+  // Same-month intern, ~40 connections, no posts, linked company page: weak
+  // signals stack with pattern.employer-unverified and it scores high (~72).
+  test.todo('a thinner brand-new intern with a linked employer page is not high');
+
+  test('a polished new recruiter persona with a photo and an About still scores high', () => {
+    const f = extractProfileFacts(
+      fakeSnapshot({
+        slug: 'morgan-reyes',
+        firstName: 'Morgan',
+        lastName: 'Reyes',
+        headline: 'Technical Recruiter at Example Corp',
+        summary: 'Matching great engineers with great teams.',
+        joinedAt: NOW - 45 * DAY,
+        positions: [{ title: 'Technical Recruiter', company: 'Example Corp', startYear: 2025, companyId: 111 }],
+        connections: '18 connections',
+        followers: 60,
+        postTimes: [],
+      }),
+      NOW,
+    );
+    const s = scoreProfile(f, NOW);
+    expect(s.level).toBe('high');
+    const ids = s.signals.map((x) => x.id);
+    for (const id of ['age.recent', 'pattern.recruiter-new', 'connections.few']) {
+      expect(ids).toContain(id);
+    }
+    expect(ids).not.toContain('photo.none');
+  });
+
+  test('resale needs three signs on an account at least three years old', () => {
+    const YEAR = 365.25 * DAY;
+    // Default slug, no photo, never posted, non-tech industry under a tech headline.
+    const resaleLooking = (joinedAt: number) => {
+      const f = extractProfileFacts(fakeSnapshot({ joinedAt, photoUploadedAt: null, postTimes: [] }), NOW);
+      return scoreProfile({ ...f, industry: 'Security & Investigations' }, NOW);
+    };
+
+    const old = resaleLooking(Date.UTC(2018, 2, 15));
+    const resale = old.signals.find((x) => x.id === 'pattern.aged-resale');
+    expect(resale?.weight).toBe(12); // three signs
+    for (const sign of ['no photo, never posted', 'default URL', 'industry left over']) {
+      expect(resale?.label).toContain(sign);
+    }
+    expect(old.level).toBe('medium');
+
+    const ids = resaleLooking(NOW - 3 * YEAR + 30 * DAY).signals.map((x) => x.id);
+    expect(ids.filter((id) => id.startsWith('aged.') || id === 'pattern.aged-resale')).toEqual([]);
+  });
+
+  test('a hidden photo is not a resale sign, but the other signs still count', () => {
+    const f = extractProfileFacts(fakeSnapshot({ photoHidden: true, joinedAt: Date.UTC(2010, 7, 15), postTimes: [] }), NOW);
+    const s = scoreProfile({ ...f, industry: 'Security & Investigations', background: { present: true, uploadedAt: NOW - 20 * DAY } }, NOW);
+    const ids = s.signals.map((x) => x.id);
+    const resale = s.signals.find((x) => x.id === 'pattern.aged-resale');
+    expect(resale).toBeDefined();
+    expect(resale?.label).not.toContain('no photo, never posted');
+    expect(ids).not.toContain('photo.none');
+    expect(ids).not.toContain('aged.shell');
+    expect(s.missing).toContain('Profile photo (hidden from your account)');
+  });
+
+  test('word-list terms count only as whole words', () => {
+    const textIds = (headline: string, summary: string) =>
+      scoreProfile(extractProfileFacts(fakeSnapshot({ slug: 'avery-park', headline, summary }), NOW), NOW)
+        .signals.map((x) => x.id)
+        .filter((id) => id.startsWith('text.'));
+    expect(textIds('Applied cryptography and defined APIs at Coinbase', 'Coaching teams; mentorship programs. Built token-based auth.')).toEqual([]);
+    expect(textIds('Web3 and DeFi builder, NFT collector', 'Passionate about helping businesses. Let’s connect!').sort()).toEqual(['text.buzz', 'text.crypto']);
+  });
+
   test('member-ID age estimates count for half', () => {
     const f = extractProfileFacts(fakeSnapshot({ joinedAt: null }), NOW);
     const sig = scoreProfile({ ...f, joined: { at: NOW - 10 * DAY, source: 'memberId' } }, NOW).signals.find((x) => x.id === 'age.new');
